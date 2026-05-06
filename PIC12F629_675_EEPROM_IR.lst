@@ -1,0 +1,1055 @@
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  1
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00001 ;**************************************************
+                      00002 ; FILE:      PIC12F629_675_EEPROM_IR.asm          *
+                      00003 ; CONTENTS:  RDA5807M I2C Control                 *
+                      00004 ; COPYRIGHT: DollY LAB. 2020-2030                                 *
+                      00005 ; AUTHOR:    Nikola Tesla                                         *
+                      00006 ; UPDATED:   13/05/22                                             *
+                      00007 ;**************************************************
+                      00008 
+                      00009  radix DEC
+                      00010 
+                      00011      ifdef __12F629
+                      00012      include "p12F629.inc"
+                      00001         LIST
+                      00002 
+                      00003 ;==========================================================================
+                      00004 ;  MPASM PIC12F629 processor include
+                      00005 ; 
+                      00006 ;  (c) Copyright 1999-2013 Microchip Technology, All rights reserved
+                      00007 ;==========================================================================
+                      00008 
+                      00338         LIST
+                      00013      list    p=12F629
+                      00014      endif
+                      00015 
+                      00016      ifdef __12F675
+                      00017      include "p12F675.inc"
+                      00018      list    p=12F675
+                      00019      endif
+                      00020 
+                      00021      errorlevel -202,-224,-302,-305 ; Warnings and Messages 
+                      00022 
+2000   0002 0009 0007 00023   __idlocs H'2975'
+       0005 
+2007   3F84           00024   __CONFIG _FOSC_INTRCIO & _PWRTE_ON & _WDT_OFF & _BODEN_OFF & _CP_OFF & _CPD_OFF & _MCLRE_OFF;
+                      00025  ;__CONFIG H'3F84'
+                      00026 
+                      00027 ;#############################################################
+                      00028 ;VARIABLES - FILE REGISTERS 
+                      00029 ;#############################################################
+                      00030 
+  00000020            00031 RAM  set  H'20'
+                      00032 
+                      00033                 cblock RAM
+                      00034 ;#################################################
+  00000020            00035 DC1         ;EQU    020h    ;Delay Count Variable1
+  00000021            00036 DC2         ;EQU    021h    ;Delay Count Variable2
+  00000022            00037 bit_count   ;EQU    022h    ;Counter of processed bits in I2C
+  00000023            00038 i2c_data    ;EQU    023h    ;Data to receive/transmit via I2C
+  00000024            00039 port        ;EQU    024h    ;Helper register to implement I2C
+  00000025            00040 ack         ;EQU    035h    ;Acknowledgment received from the device
+  00000026            00041 Loc_Ptr     ;EQU    026h    ;/*EEPROM R/W Address Holder */
+  00000027            00042 volume      ;EQU    027h    ;Radio volume level
+  00000028            00043 frequency_l ;EQU    017h    ;Frequency low byte
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  2
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+  00000029            00044 frequency_h ;EQU    018h    ;Frequency high byte
+  0000002A            00045 count       ;EQU    019h    ;Stores the time the button is pressed
+  0000002B            00046 button      ;EQU    01Ah    ;The number of button that is pressed
+  0000002C            00047 startup     ;EQU    01Bh    ;Indicates if it's the startup state
+  0000002D            00048 timer       ;EQU    01Ch    ;Counts time before storing the station
+  0000002E            00049 need_save   ;EQU    01Dh    ;Indicates if current station need to be saved
+                      00050 ;#################################################
+  0000002F            00051 _count      ;EQU    02Fh    ;Saved value of the timer
+  00000030            00052 _byte_count ;EQU    030h    ;Counter of processed bytes
+  00000031            00053 _bit_count  ;EQU    031h    ;Counter of processed bits
+  00000032            00054 _port       ;EQU    032h    ;Helper register to implement 1-wire and TWI
+  00000033            00055 _color      ;EQU    019h    ;Stores the color of the RGB LED
+  00000034            00056 _ir_data:4  ;EQU    01Ah    ;First IR byte
+                      00057 ;#################################################
+  00000038            00058 RAM_            
+                      00059                 endc
+                      00060 
+                      00061  if RAM_ > H'60'
+                      00062  ERROR "File register usage overflow"
+                      00063  endif
+                      00064 
+                      00065 ;#############################################################
+                      00066 ; I/O PORT PINS ASSIGNMENT
+                      00067 ;#############################################################
+  00000000            00068 but_up      EQU    GP0  ;3    ;Button Volume up/Next station
+  00000001            00069 but_down    EQU    GP1  ;0    ;Button Volume down/Previous station
+  00000003            00070 ir          EQU    GP3  ;      IR Rx INPUT 38kHz TSOP 1838
+  00000004            00071 scl         EQU    GP4  ;1    ;SCL pin of the I2C
+  00000005            00072 sda         EQU    GP5  ;2    ;SDA pin of the I2C
+                      00073 ;#############################################################
+                      00074 
+0000                  00075         ORG    0x00
+                      00076 
+0000   2805           00077         goto   INIT
+0001   0000           00078     nop
+0002   0000           00079     nop
+0003   0000           00080     nop
+                      00081 
+                      00082 ;       ORG    0x04
+0004                  00083     ORG    0004h
+                      00084 
+                      00085 ;    bcf INTCON, GIE
+                      00086 ;    btfsc  INTCON, GPIF
+                      00087 ; goto IR_Rx
+                      00088 ;       goto   _LOOP
+                      00089 ;       bsf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00090 ;       bsf INTCON, GIE  ;7;-> ENABLE all interrupts
+                      00091 ;///    goto LOOP ; RETFIE
+0004   0009           00092         RETFIE
+                      00093 
+0005                  00094 INIT:
+0005   1683           00095     bsf    STATUS,RP0
+0006   23FF           00096     call   H'3FF'
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  3
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0007   0090           00097     movwf  OSCCAL
+0008   3057           00098         MOVLW  ~((1<<T0CS)|(1<<NOT_GPPU)|(1<<PSA))
+0009   0081           00099         MOVWF  OPTION_REG       ;       /
+                      00100 ;    bcf    STATUS,RP0
+                      00101 
+                      00102 ;    MOVLW  ~((1<<T0CS)|(1<<NOT_GPPU))
+                      00103 ;    OPTION              ;Enable GPIO2 and pull-ups
+                      00104 ;    MOVLW  0x3F;0x0F          ;Save 0x0F into 'port' register
+                      00105 ;    MOVWF  port          ;It's used to switch SDA/SCL pins direction
+                      00106 ;    TRIS   GPIO           ;Set all pins as inputs
+                      00107 ;#############################################################
+                      00108 ;EXAMPLE 3-1: INITIALIZING GPIO
+                      00109 ;bcf STATUS,RP0 ;Bank 0
+                      00110 ;clrf GPIO ;Init GPIO
+                      00111 ;movlw 07h ;Set GP<2:0> to
+                      00112 ;movwf CMCON ;digital IO
+                      00113 ;bsf STATUS,RP0 ;Bank 1
+                      00114 ;clrf ANSEL ;Digital I/O
+                      00115 ;movlw 0Ch ;Set GP<3:2> as inputs
+                      00116 ;movwf TRISIO ;and set GP<5:4,1:0> ;as outputs
+                      00117 ;#############################################################
+000A   1283           00118         bcf    STATUS,RP0 ;Bank 0
+                      00119 ;////// clrf   GPIO ;Init GPIO
+000B   3007           00120         movlw  07h ;Set GP<2:0> to
+000C   0099           00121         movwf  CMCON ;digital IO
+                      00122 ;       bsf    STATUS,RP0 ;Bank 1
+                      00123 ;#############################################################
+                      00124 ;       bcf    STATUS,RP0 ;Bank 0
+000D   1399           00125         bcf    VRCON, VREN ;VRCON-VOLTAGE REF CTRL REG (99h)
+                      00126 ;#############################################################
+                      00127 ;#############################################################
+                      00128 ;PIE1 - PERIPHERAL INTERRUPT ENABLE REGISTER 1 (ADDRESS: 8Ch)
+                      00129 
+000E   138C           00130         bcf    PIE1, EEIE   ;7; Disables the EE write complete interrupt
+000F   130C           00131         bcf    PIE1, ADIE   ;6; Disables the A/D converter interrupt
+0010   118C           00132         bcf    PIE1, CMIE   ;3; Disables the A/D converter interrupt
+0011   100C           00133         bcf    PIE1, TMR1IE ;0; Disables the TMR1 overflow interrupt
+                      00134 ;#############################################################
+                      00135 
+                      00136  ifdef __12F675
+                      00137    banksel ADCON0
+                      00138         bcf    ADCON0, ADON
+                      00139    banksel ANSEL
+                      00140         CLRF   ANSEL            ;SELECT ALL DIGITAL I/O
+                      00141  endif
+                      00142 
+                      00143 ;       MOVLW   B'00111011'             ;SELECT PULLUP RESISTORS
+                      00144 ;       MOVWF   WPU             ;       /
+0012   303B           00145         MOVLW  B'00111011'              ;SETUP IO DIRECTION
+0013   0085           00146         MOVWF  TRISIO           ;       /
+                      00147 ;       MOVLW   B'10000000'     ;LOAD OPTION REGISTER
+                      00148                                 ;BIT 7 - 0 = WEAK PULL-UPS ENABLED
+                      00149                                 ;BIT 6 - 1 = INTERRUPT ON RISING EDGE OF GP2 disabled
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  4
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00150                                 ;BIT 5 - 0 = TMR0 CLOCK SET TO GP2 PIN //disable
+                      00151                                 ;BIT 4 - 1 = TMR0 INC ON HIGH TO LOW 
+                      00152                                 ;BIT 3 - 1 = PRESCALER ASSIGNED TO WDT
+                      00153                                 ;BIT 2..1  = PRESCALER SET TO MAX
+                      00154 
+                      00155 ;       clrf   INTCON
+                      00156 ;       bcf    INTCON, GIE
+                      00157 ;   BCF    STATUS,RP0   ;SET BANK 0
+                      00158 
+                      00159 ;#############################################################
+                      00160 ;IOC - INTERRUPT-ON-CHANGE GPIO REGISTER (ADDRESS: 96h)
+                      00161 ;//     clrf   IOC       ; Clear all the 5 Bits of IOC register
+                      00162 ;//     bsf    IOC, IOC3 ; Set the GP3 Pin for the IOC Enabled
+                      00163 ;#############################################################
+                      00164 ;#############################################################
+                      00165 ;INTCON - INTERRUPT CONTROL REGISTER (ADDRESS: 0Bh OR 8Bh)
+0014   138B           00166         bcf INTCON, GIE  ;7;-> Disables all interrupts
+0015   130B           00167         bcf INTCON, PEIE ;6;   Disables all peripheral interrupts
+0016   128B           00168         bcf INTCON, T0IE ;5;   Disables the TMR0 interrupt
+0017   120B           00169         bcf INTCON, INTE ;4;   Disables the GP2/INT external interrupt
+0018   118B           00170         bcf INTCON, GPIE ;3;-> ENABLE/Disables the GPIO port change interrupt
+0019   138B           00171         bcf INTCON, GIE  ;7;-> ENABLE/Disables all interrupts
+                      00172 ;bcf INTCON, T0IF ;2; TMR0 register did not overflow
+                      00173 ;#############################################################
+                      00174 ;#############################################################
+                      00175 
+001A   30FF           00176     MOVLW  0xFF          ;Perform 200 ms delay
+001B   20EA           00177     CALL   DELAY          ;to let the power stabilize
+                      00178 ;#######################################################################
+                      00179 
+001C   30FF           00180     MOVLW  0xFF          ;Perform 400 ms delay
+001D   20EA           00181     CALL   DELAY         ;to let the power stabilize
+001E   30FF           00182     MOVLW  0xFF          ;Perform 600 ms delay
+001F   20EA           00183     CALL   DELAY         ;to let the power stabilize
+0020   30FF           00184     MOVLW  0xFF          ;Perform 800 ms delay
+0021   20EA           00185     CALL   DELAY         ;to let the power stabilize
+                      00186 ;#######################################################################
+                      00187 
+0022   0185           00188     CLRF   GPIO           ;Clear GPIO to set all pins to 0
+0023   01AE           00189     CLRF   need_save      ;No need to save the station for now
+0024   142C           00190     BSF    startup, 0      ;Set 'startup' to 1 to indicate startup state
+                      00191 ;#######################################################################
+                      00192 
+0025                  00193 LOAD_EEPROM:
+0025   01A6           00194         clrf   Loc_Ptr        ;00<- Loc_Ptr to Volume Information
+0026   210A           00195         call   READ_EEPROM        ;read the Volume information stored
+0027   00A7           00196     movwf  volume         ;And store it into 'volume' register
+                      00197 
+0028   0AA6           00198         incf   Loc_Ptr,f          ;01<- Loc_Ptr to Channel Freq Information
+0029   210A           00199         call   READ_EEPROM        ;Read the Channel Frequency Low Byte Info
+002A   00A8           00200     movwf  frequency_l    ;and store its content into 'frequency_l'
+                      00201 
+002B   0AA6           00202         incf   Loc_Ptr,f          ;02<- Loc_Ptr to Channel Freq Information
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  5
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+002C   210A           00203         call   READ_EEPROM    ;Read the Channel Frequency High Byte Info
+002D   00A9           00204     movwf  frequency_h    ;and store its content into 'frequency_h'
+                      00205 ;#######################################################################
+                      00206 
+002E   30C0           00207     MOVLW  0xC0           ;Implement AND operation between 0xC0
+002F   05A8           00208     ANDWF  frequency_l, F ;and 'frequency_l' to clear its last 6 bits
+0030   1628           00209     BSF    frequency_l, 4 ;Set bit 4 (Tune) to adjust the frequency
+                      00210 
+0031                  00211 START_RADIO:
+                      00212                           ;Start FM radio
+0031   20BA           00213     CALL   I2C_START      ;Issue I2C Start condition
+0032   3020           00214     MOVLW  0x20           ;Radio chip address for sequential writing is 0x20
+0033   20C1           00215     CALL   I2C_WRITE_BYTE ;Write the radio address via i2C
+0034   30C0           00216     MOVLW  0xC0           ;Write high byte into radio register 0x02
+0035   20C1           00217     CALL   I2C_WRITE_BYTE
+0036   3001           00218     MOVLW  0x01           ;Write low byte into radio register 0x02
+0037   20C1           00219     CALL   I2C_WRITE_BYTE
+0038   0829           00220     MOVF   frequency_h, W ;Write high byte into radio register 0x03
+0039   20C1           00221     CALL   I2C_WRITE_BYTE
+003A   0828           00222     MOVF   frequency_l, W ;Write low byte into radio register 0x03
+003B   20C1           00223     CALL   I2C_WRITE_BYTE
+003C   20BD           00224     CALL   I2C_STOP       ;Issue I2C Stop condition
+                      00225 
+003D   300F           00226     MOVLW  0x0F         ;Implement AND operation between 0xC0
+003E   05A7           00227     ANDWF  volume, F    ;and 'volume' to clear its higher 4 bits
+003F   17A7           00228     BSF    volume, 7    ;Set bit 7  to select correct LNA input
+0040   285D           00229     GOTO   SET_VOLUME   ;And go to the 'SET_VOLUME' label
+                      00230 
+0041                  00231 LOOP:                   ;Main loop of the program
+                      00232                         ;Beginning of the button 1 checking
+                      00233 ;// bsf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00234 ;// bsf INTCON, GIE  ;7;-> ENABLE all interrupts
+0041   20A5           00235     CALL   CHECK_BUTTONS  ;Read the buttons state
+0042   3903           00236     ANDLW  3             ;Clear all the bits of the result except two LSBs
+0043   1903           00237     BTFSC  STATUS, Z     ;If result is 0 (none of buttons were pressed)
+0044   2884           00238     GOTO   WAIT_FOR_TIMER ;Then go to the 'WAIT_FOR_TIMER' label 
+0045   3028           00239     MOVLW  .40            ;Otherwise load initial value for the delay  
+0046   20EA           00240     CALL   DELAY          ;and perform the debounce delay
+0047   20A5           00241     CALL   CHECK_BUTTONS  ;Then check the buttons state again
+0048   3903           00242     ANDLW  3
+0049   1903           00243     BTFSC  STATUS, Z     ;If result is 0 (none of buttons were pressed)
+004A   2884           00244     GOTO   WAIT_FOR_TIMER ;Then go to the 'WAIT_FOR_TIMER' label
+004B   00AB           00245     MOVWF  button        ;Save the W value into the 'button'
+004C   01AA           00246     CLRF   count          ;clear loop counter
+                      00247 
+004D                  00248 BUTTONS_LOOP:           ;Loop while button is pressed
+004D   30FF           00249     MOVLW  0xFF          ;Load initial value for the delay 200ms
+004E   20EA           00250     CALL   DELAY          ;And perform the delay
+004F   20A5           00251     CALL   CHECK_BUTTONS  ;Then check the buttons state again
+0050   3903           00252     ANDLW  3
+0051   1903           00253     BTFSC  STATUS, Z     ;If state is 0 (it was a short press)
+0052   286B           00254     GOTO   CHANNEL_SEEK    ;Go to the 'CHANNEL_SEEK' label
+0053   0AAA           00255     INCF   count, F       ;Otherwise (long press) increment the counter
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  6
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0054   1C2B           00256     BTFSS  button, 0     ;Check the last bit of the 'button' register
+0055   285A           00257     GOTO   DECREASE_VOLUME;If it's 0 (Down), go to 'DECREASE_VOLUME'
+                      00258 
+0056                  00259 INCREASE_VOLUME:        ;Otherwise start 'INCREASE_VOLUME'
+0056   0AA7           00260     INCF   volume, F      ;Increment the 'volume' register
+0057   1A27           00261     BTFSC  volume, 4     ;If bit 4 becomes set (volume = 0b10010000)
+0058   03A7           00262     DECF   volume, F      ;then decrement the 'volume' to get 0b10001111
+0059   285D           00263     GOTO   SET_VOLUME     ;and go to the 'SET_VOLUME' label
+                      00264 
+005A                  00265 DECREASE_VOLUME:        ;Decrease the volume here
+005A   03A7           00266     DECF   volume, F      ;Decrement the 'volume' register
+005B   1FA7           00267     BTFSS  volume, 7     ;If bit 7 becomes 0 (volume = 0b01111111)
+005C   0AA7           00268     INCF   volume, F      ;then increment the 'volume' to get 0b10000000
+                      00269 
+005D                  00270 SET_VOLUME:               ;Set the radio volume
+005D   20BA           00271     CALL   I2C_START      ;Issue I2C start condition
+005E   3022           00272     MOVLW  0x22           ;Radio chip address for random writing is 0x22
+005F   20C1           00273     CALL   I2C_WRITE_BYTE ;Write the radio address via I2C
+0060   3005           00274     MOVLW  0x05           ;Set the register number to write to (0x05)
+0061   20C1           00275     CALL   I2C_WRITE_BYTE ;And write it via I2C
+0062   3088           00276     MOVLW  0x88           ;Set the high byte of 0x05 register (default value)
+0063   20C1           00277     CALL   I2C_WRITE_BYTE ;And write it via i2C
+0064   0827           00278     MOVF   volume, W      ;Set the 'volume' as low byte of 0x05 register
+0065   20C1           00279     CALL   I2C_WRITE_BYTE ;And write it via I2C
+0066   20BD           00280     CALL   I2C_STOP       ;Issue Stop condition
+0067   1C2C           00281     BTFSS  startup, 0     ;If 'startup' is 0 (not startup condition)
+0068   284D           00282     GOTO   BUTTONS_LOOP   ;Then return to the 'BUTTONS_LOOP' label
+0069   102C           00283     BCF    startup, 0     ;Otherwise reset the 'startup' register
+                      00284 ; bcf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00285 ; bcf INTCON, GIE  ;7;-> ENABLE all interrupts
+                      00286 ; clrf _ir_data
+006A   2841           00287     GOTO   LOOP           ;And return to the 'LOOP' label
+                      00288 
+006B                  00289 CHANNEL_SEEK:             ;Here button is released and we check what to do
+006B   08AA           00290     MOVF   count, F       ;Check if 'count' register is 0
+006C   1D03           00291     BTFSS  STATUS, Z      ;If 'count' is not 0 (it was a long press)
+006D   2881           00292     GOTO   SAVE_VOLUME    ;then go to the 'SAVE VOLUME' label
+006E   01AD           00293     CLRF   timer          ;Otherwise (short press) we clear the 'timer'
+006F   142E           00294     BSF    need_save, 0   ;And set the 'need_save' register
+                      00295 
+0070                  00296 CH_UP:
+0070   20BA           00297     CALL I2C_START      ;Issue I2C Start condition
+0071   3020           00298     MOVLW 0x20          ;Radio chip address for sequential writing is 0x20
+0072   20C1           00299     CALL I2C_WRITE_BYTE ;Write the radio address via I2C
+0073   1C2B           00300     BTFSS button, 0     ;Check the last bit of the 'button' register
+0074   287B           00301     GOTO SEEK_DOWN      ;If it's 0 (button Down), go to 'SEEK_DOWN' label
+0075   30C3           00302     MOVLW 0xC3          ;Otherwise set 0xC3 as high byte of 0x02 register
+0076   20C1           00303     CALL I2C_WRITE_BYTE ;And write it via I2C
+0077   3001           00304     MOVLW 0x01          ;Set 0x01 as low byte of 0x02 register
+0078   20C1           00305     CALL I2C_WRITE_BYTE ;And write it via I2C
+0079   20BD           00306     CALL I2C_STOP       ;Issue I2C Stop condition
+                      00307 ; bcf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00308 ; bcf INTCON, GIE  ;7;-> ENABLE all interrupts
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  7
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00309 ; clrf _ir_data
+007A   2884           00310     GOTO WAIT_FOR_TIMER ;And go to the 'WAIT_FOR_TIMER' label
+                      00311 
+007B                  00312 SEEK_DOWN:              ;Seek the station down
+007B   30C1           00313     MOVLW 0xC1          ;Set 0xC1 as high byte of 0x02 register
+007C   20C1           00314     CALL I2C_WRITE_BYTE ;Ending of previous transaction
+007D   3001           00315     MOVLW 0x01          ;Set 0x01 as low byte of 0x02 register
+007E   20C1           00316     CALL I2C_WRITE_BYTE ;And write it via I2C
+007F   20BD           00317     CALL I2C_STOP       ;Issue I2C Stop condition
+0080   2884           00318     GOTO WAIT_FOR_TIMER ;And go to the 'WAIT_FOR_TIMER' label
+                      00319 ;####################################################################
+                      00320 
+0081                  00321 SAVE_VOLUME:
+0081   01A6           00322         clrf   Loc_Ptr        ;ADDRESS to 0x00
+0082   0827           00323         MOVFW  volume         ;Move Volume value to W Register
+0083   20F3           00324         call   WRITE_EEPROM   ;Write current Volume into EEPROM
+                      00325 ;####################################################################
+                      00326 
+0084                  00327 WAIT_FOR_TIMER:           ;Wait for 10 second to save the channel to EEPROM
+0084   302D           00328     MOVLW  45             ;Set the delay about 40 ms
+0085   20EA           00329     CALL   DELAY          ;And call the DELAY subroutine
+0086   0FAD           00330     INCFSZ timer, F       ;Increase the 'timer' and check while it becomes 0
+0087   2841           00331     GOTO   LOOP           ;If it's not 0 then return to the 'LOOP' label
+                      00332 
+0088   1C2E           00333     BTFSS  need_save, 0   ;Otherwise check the 'need_save' register
+0089   2841           00334     GOTO   LOOP           ;If it's 0 then return to the 'LOOP' register
+008A   102E           00335     BCF    need_save, 0   ;Otherwise clear the 'need_save' register
+008B   20BA           00336     CALL   I2C_START      ;Issue I2C start condition
+008C   3022           00337     MOVLW  0x22           ;Set the radic chip address for random writing
+008D   20C1           00338     CALL   I2C_WRITE_BYTE ;And write it via I2C
+008E   3003           00339     MOVLW  0x03           ;Set the radio register to read from (0x03)
+008F   20C1           00340     CALL   I2C_WRITE_BYTE ;And write it via I2C
+0090   20BA           00341     CALL   I2C_START      ;Issue I2C Repeated start condition
+0091   3023           00342     MOVLW  0x23           ;Set the radio chip address for random reading
+0092   20C1           00343     CALL   I2C_WRITE_BYTE ;And write it via I2C
+0093   20D5           00344     CALL   I2C_READ_BYTE  ;Read the high byte of the register 0x03
+0094   20E1           00345     CALL   I2C_ACK        ;Issue the Acknowledgement
+0095   0823           00346     MOVF   i2c_data, W    ;Copy the 'i2c_data' content into W register
+0096   00A9           00347     MOVWF  frequency_h    ;And save it to the 'frequency_h' register
+0097   20D5           00348     CALL   I2C_READ_BYTE  ;Read the low byte of the register 0x03
+0098   20E6           00349     CALL   I2C_NACK       ;Issue the Not acknowledgement
+0099   0823           00350     MOVF   i2c_data, W    ;Copy the 'i2c_data' content into W register
+009A   00A8           00351     MOVWF  frequency_l    ;And save it to the 'frequency_l' register
+009B   20BD           00352     CALL   I2C_STOP       ;Issue I2C stop condition
+                      00353 ;#############################################################################
+                      00354 
+009C                  00355 SAVE_CH:
+009C   01A6           00356         clrf   Loc_Ptr            ;0x00
+009D   0AA6           00357         incf   Loc_Ptr,f          ;0x01
+009E   0828           00358         MOVF   frequency_l,W  ;0x01
+009F   20F3           00359         call   WRITE_EEPROM
+00A0   0AA6           00360         incf   Loc_Ptr,f          ;0x02
+00A1   13A9           00361         BCF    frequency_h,7
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  8
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+00A2   0829           00362         MOVF   frequency_h,W
+00A3   20F3           00363         call   WRITE_EEPROM
+                      00364 ;#############################################################################
+                      00365 
+00A4   2841           00366     GOTO LOOP           ;loop forever
+                      00367 ;-------------Check buttons---------------
+00A5                  00368 CHECK_BUTTONS:
+                      00369 ;#############################################################
+                      00370 ;INTCON - INTERRUPT CONTROL REGISTER (ADDRESS: 0Bh OR 8Bh)
+                      00371 ;       bsf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00372 ;       bsf INTCON, GIE  ;7;-> ENABLE all interrupts
+                      00373 ;       bcf INTCON, PEIE ;6;   Disables all peripheral interrupts
+                      00374 ;       bcf INTCON, T0IE ;5;   Disables the TMR0 interrupt
+                      00375 ;       bcf INTCON, INTE ;4;   Disables the GP2/INT external interrupt
+                      00376 ;       bsf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00377 ;bcf INTCON, T0IF ;2; TMR0 register did not overflow
+                      00378 ;#############################################################
+                      00379 
+                      00380 
+00A5   1C05           00381     BTFSS GPIO, but_up  ;Check if button Up is pressed
+00A6   3401           00382     RETLW 1             ;and return 1 (b'01')
+00A7   1C85           00383     BTFSS GPIO, but_down;Check if button Down is pressed
+00A8   3402           00384     RETLW 2             ;and return 2 (b'10')
+                      00385 ;// goto _LOOP ;///140522////////
+                      00386 ;//CONTINUE:
+                      00387 ; btfss GPIO, GP3
+                      00388 ; goto IR_Rx
+00A9   3400           00389     RETLW 0             ;If none of buttons is pressed then return 0
+                      00390 ;-------------Helper subroutines---------------
+00AA                  00391 SDA_HIGH:               ;Set SDA pin high
+00AA   16A4           00392     BSF port, sda       ;Set 'sda' bit in the 'port' to make it input
+00AB   0824           00393     MOVF port, W        ;Copy 'port' into W register
+00AC   0065           00394     TRIS GPIO           ;And set it as TRISGPIO value
+00AD   3400           00395     RETLW 0
+                      00396 
+00AE                  00397 SDA_LOW:                ;Set SDA pin low
+00AE   12A4           00398     BCF port, sda       ;Reset 'sda' bit in the 'port' to make it output
+00AF   0824           00399     MOVF port, W        ;Copy 'port' into W register
+00B0   0065           00400     TRIS GPIO           ;And set it as TRISGPIO value
+00B1   3400           00401     RETLW 0
+                      00402 
+00B2                  00403 SCL_HIGH:               ;Set SCL pin high
+00B2   1624           00404     BSF port, scl       ;Set 'scl' bit in the 'port' to make it input
+00B3   0824           00405     MOVF port, W        ;Copy 'port' into W register
+00B4   0065           00406     TRIS GPIO           ;And set it as TRISGPIO value
+00B5   3400           00407     RETLW 0
+                      00408 
+00B6                  00409 SCL_LOW:                ;Set SCL pin low
+00B6   1224           00410     BCF port, scl       ;Reset 'scl' bit in the 'port' to make it output
+00B7   0824           00411     MOVF port, W        ;Copy 'port' into W register
+00B8   0065           00412     TRIS GPIO           ;And set it as TRISGPIO value
+00B9   3400           00413     RETLW 0
+                      00414 
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE  9
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00415 ;-------------I2C start condition--------------
+00BA                  00416 I2C_START:
+00BA   20B2           00417     CALL SCL_HIGH       ;Set SCL high
+00BB   20AE           00418     CALL SDA_LOW        ;Then set SDA low
+00BC   3400           00419     RETLW 0
+                      00420 ;-------------I2C stop condition---------------
+00BD                  00421 I2C_STOP:
+00BD   20AE           00422     CALL SDA_LOW        ;Set SDA low
+00BE   20B2           00423     CALL SCL_HIGH       ;Set SCL high
+00BF   20AA           00424     CALL SDA_HIGH       ;Then set SDA highs and release the bus
+00C0   3400           00425     RETLW 0
+                      00426 ;------------I2C write byte--------------------
+00C1                  00427 I2C_WRITE_BYTE:
+00C1   00A3           00428     MOVWF i2c_data      ;Load 'i2c_data' from W register
+00C2   3008           00429     MOVLW 8             ;Load value 8 into 'bit_count'
+00C3   00A2           00430     MOVWF bit_count     ;to indicate we're going to send 8 bits
+00C4                  00431 I2C_WRITE_BIT:          ;Write single bit to I2C
+00C4   20B6           00432     CALL SCL_LOW        ;Set SCL low, now we can change SDA
+00C5   1FA3           00433     BTFSS i2c_data, 7   ;Check the MSB of 'i2c_data'
+00C6   28C9           00434     GOTO I2C_WRITE_0    ;If it's 0 then go to the 'I2C_WRITE_0' label
+00C7                  00435 I2C_WRITE_1:            ;Else continue with 'I2C_WRITE_1'
+00C7   20AA           00436     CALL SDA_HIGH       ;Set SDA high
+00C8   28CA           00437     GOTO I2C_SHIFT      ;And go to the 'I2C_SHIFT' label
+00C9                  00438 I2C_WRITE_0:
+00C9   20AE           00439     CALL SDA_LOW        ;Set SDA low
+00CA                  00440 I2C_SHIFT:
+00CA   20B2           00441     CALL SCL_HIGH       ;Set SCL high to start the new pulse
+00CB   0DA3           00442     RLF i2c_data, F     ;Shift 'i2c_data' one bit to the left
+00CC   0BA2           00443     DECFSZ bit_count, F ;Decrement the 'bit_count' value, check if it's 0
+00CD   28C4           00444     GOTO I2C_WRITE_BIT  ;If not then return to the 'I2C_WRITE_BIT'
+00CE                  00445 I2C_CHECK_ACK:          ;Else check the acknowledgement bit
+00CE   20B6           00446     CALL SCL_LOW        ;Set I2C low to end the last pulse
+00CF   20AA           00447     CALL SDA_HIGH       ;Set SDA high to release the bus
+00D0   20B2           00448     CALL SCL_HIGH       ;Set I2C high to start the new pulse
+00D1   0805           00449     MOVF GPIO, W        ;Copy the GPIO register value into the 'ack'
+00D2   00A5           00450     MOVWF ack           ;Now bit 'sda' of the 'ack' will contain ACK bit
+00D3   20B6           00451     CALL SCL_LOW        ;Set SCL low to end the acknowledgement bit
+00D4   3400           00452     RETLW 0
+                      00453 ;------------I2C read byte--------------------
+00D5                  00454 I2C_READ_BYTE:
+00D5   3008           00455     MOVLW 8             ;Load value 8 into 'bit_count'
+00D6   00A2           00456     MOVWF bit_count     ;to indicate we're going to receive 8 bits
+00D7   01A3           00457     CLRF i2c_data       ;Clear the 'i2c_data' register
+00D8                  00458 I2C_READ_BIT:           ;Read single bit from the I2C
+00D8   0DA3           00459     RLF i2c_data, F     ;Shift the 'i2c_data' register one bit to the left
+00D9   20B6           00460     CALL SCL_LOW        ;Set SCL low to prepare for the new bit
+00DA   20B2           00461     CALL SCL_HIGH       ;Set SCL high to read the bit value
+00DB   1A85           00462     BTFSC GPIO, sda     ;Check the 'sda' bit in the GPIO register
+00DC   1423           00463     BSF i2c_data, 0     ;if it's 1 then set the LSB of the 'i2c_data'
+00DD   0BA2           00464     DECFSZ bit_count, F ;Decrement the 'bit_count' value, check if it's 0
+00DE   28D8           00465     GOTO I2C_READ_BIT   ;If not, then return to the 'I2C_READ_BIT'
+00DF   20B6           00466     CALL SCL_LOW        ;Set SCL low to end the last pulse
+00E0   3400           00467     RETLW 0             ;Otherwise return from the subroutine
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 10
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+                      00468 ;----------I2C send ACK----------------------
+00E1                  00469 I2C_ACK:
+00E1   20AE           00470     CALL SDA_LOW        ;Set SDA low to issue ACK condition
+00E2   20B2           00471     CALL SCL_HIGH       ;Set SCL high to start the new pulse
+00E3   20B6           00472     CALL SCL_LOW        ;Set SCL low to end the pulse
+00E4   20AA           00473     CALL SDA_HIGH       ;Set SDA high to release the bus
+00E5   3400           00474     RETLW 0
+                      00475 ;----------I2C send NACK----------------------
+00E6                  00476 I2C_NACK:
+00E6   20AA           00477     CALL SDA_HIGH       ;Set SDA low to issue NACK condition
+00E7   20B2           00478     CALL SCL_HIGH       ;Set SCL high to start the new pulse
+00E8   20B6           00479     CALL SCL_LOW        ;Set SCL low to end the pulse
+00E9   3400           00480     RETLW 0
+                      00481 
+                      00482 ;-------------Delay subroutine--------------
+00EA                  00483 DELAY:                   ;Start DELAY subroutine here  
+00EA   00A0           00484     MOVWF  DC1           ;Copy the value to the register i
+00EB   00A1           00485     MOVWF  DC2           ;Copy the value to the register j
+00EC                  00486 DELAY_LOOP:              ;Start delay loop
+00EC   1D85           00487  btfss GPIO, GP3
+00ED   2911           00488  goto IR_Rx
+00EE   0BA0           00489     DECFSZ DC1, F        ;Decrement i and check if it is not zero
+00EF   28EC           00490     GOTO   DELAY_LOOP    ;If not, then go to the DELAY_LOOP label
+00F0   0BA1           00491     DECFSZ DC2, F        ;Decrement j and check if it is not zero
+00F1   28EC           00492     GOTO   DELAY_LOOP    ;If not, then go to the DELAY_LOOP label
+00F2   3400           00493     RETLW  0             ;Else return from the subroutine
+                      00494 ;------------------------------------------------------------------------------
+                      00495 ; writes the EEPROM using W Register
+                      00496 ;------------------------------------------------------------------------------
+00F3                  00497 WRITE_EEPROM:
+00F3   1683           00498     bsf    STATUS,RP0
+00F4   009A           00499     movwf  EEDATA
+00F5   0826           00500     movfw  Loc_Ptr      ;//////////////////////////////////
+00F6   009B           00501     movwf  EEADR        ;//////////////////////////////////
+00F7   081A           00502     movfw  EEDATA
+00F8   141C           00503     bsf    EECON1,RD
+00F9   069A           00504     xorwf  EEDATA       ;//////////destination?////////////
+00FA   1903 2908      00505     bz     write2
+00FC   009A           00506     movwf  EEDATA
+00FD   151C           00507     bsf    EECON1,WREN
+00FE   138B           00508     bcf    INTCON,GIE ;Disable INTs
+00FF   3055           00509     movlw  0x55         ;//////////////////////////////////
+0100   009D           00510     movwf  EECON2       ;//////////////////////////////////
+0101   30AA           00511     movlw  0xAA         ;//////////////////////////////////
+0102   009D           00512     movwf  EECON2       ;//////////////////////////////////
+0103   149C           00513         bsf    EECON1,WR
+0104   178B           00514     bsf    INTCON,GIE ;Enable INTS
+0105                  00515 write1:
+0105   189C           00516     btfsc  EECON1,WR
+0106   2905           00517     goto   write1
+0107   111C           00518     bcf    EECON1,WREN
+0108                  00519 write2: 
+0108   1283           00520         bcf    STATUS,RP0
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 11
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+0109   0008           00521     return
+                      00522 ;------------------------------------------------------------------------------
+                      00523 ; reads the EEPROM into W Register
+                      00524 ;------------------------------------------------------------------------------
+010A                  00525 READ_EEPROM:
+010A   1683           00526     bsf    STATUS,RP0
+010B   0826           00527     movfw  Loc_Ptr  ;///////////////////////////////////////
+010C   009B           00528     movwf  EEADR        ;////////////////////////////////////
+010D   141C           00529     bsf    EECON1,RD
+010E   081A           00530     movfw  EEDATA
+010F   1283           00531     bcf    STATUS,RP0
+0110   0008           00532     return
+                      00533 ;------------------------------------------------------------------------------
+                      00534 ;##############################################################################
+0111                  00535 IR_Rx:      ;---IR REMOTE CONTROL 38kHz ROUTINE--------------------------------
+                      00536 ;##############################################################################
+                      00537 
+0111                  00538 _LOOP:                    ;Main loop of the program
+                      00539 ;---------------Wait for the preamble positive pulse---------------------
+0111   1985           00540     BTFSC GPIO, ir       ;Wait while 'ir' pin goes down
+0112   2911           00541     GOTO _LOOP           ;If it's high then return to 'LOOP'
+                      00542 ;///    GOTO CONTINUE ; //LOOP           ;If it's high then return to 'LOOP'
+0113                  00543 INT_JMP:
+0113   0181           00544     CLRF  TMR0           ;Otherwise clear the timer register
+0114   1D85           00545     BTFSS GPIO, ir       ;And wait while 'ir' is low
+0115   2914           00546     GOTO  $-1
+0116   0801           00547     MOVF  TMR0, W        ;Copy the TMR0 value into the W register
+0117   00AF           00548     MOVWF _count         ;and save the value into the 'count' register
+0118   301E           00549     MOVLW d'30'          ;Load 30 into W (256 us x 32 = 7.7 ms)
+0119   022F           00550     SUBWF _count, W      ;And subtract W from 'count'
+011A   1C03           00551     BTFSS STATUS, C      ;If 'count' < 30 (pulse is shorter than 7.7 ms)
+011B   2911           00552     GOTO  _LOOP          ;then return to 'LOOP'
+011C   302D           00553     MOVLW d'45'          ;Load 45 into W (256 us x 45 = 11.5 ms)
+011D   022F           00554     SUBWF _count, W      ;And subtract W from 'count'
+011E   1803           00555     BTFSC STATUS, C      ;If 'count' > 45 (pulse is longer than 8 ms)
+011F   2911           00556     GOTO _LOOP           ;then return to 'LOOP'
+                      00557 ;---------------Check the preamble negative pulse---------------------
+0120   0181           00558     CLRF TMR0            ;Otherwise clear the timer register
+0121   1985           00559     BTFSC GPIO, ir       ;And wait while 'ir' is high
+0122   2921           00560     GOTO $-1
+0123   0801           00561     MOVF TMR0, W         ;Copy the TMR0 value into the W register
+0124   00AF           00562     MOVWF _count         ;and save the value into the 'count' register
+0125   300D           00563     MOVLW d'13'          ;Load 15 into W (256 us x 13 = 3.3 ms)
+0126   022F           00564     SUBWF _count, W      ;And subtract W from 'count'
+0127   1C03           00565     BTFSS STATUS, C      ;If 'count' < 13 (pulse is shorter than 3.3 ms)
+0128   2911           00566     GOTO _LOOP           ;then return to 'LOOP'
+0129   3014           00567     MOVLW d'20'          ;Load 20 into W (256 us x 20 = 5.1 ms)
+012A   022F           00568     SUBWF _count, W      ;And subtract W from 'count'
+012B   1803           00569     BTFSC STATUS, C      ;If 'count' > 20 (pulse is longer than 5.1 ms)
+012C   2911           00570     GOTO _LOOP           ;then return to 'LOOP'
+                      00571 ;---------------Receive the command bytes-----------------------------
+012D   01B0           00572     CLRF _byte_count     ;Clear the 'byte_count' register    
+012E   3034           00573     MOVLW _ir_data       ;Load the address of the 'ir_data' into W
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 12
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+012F   0084           00574     MOVWF FSR            ;and save it to the indirect pointer register
+0130                  00575 _RECEIVE_BYTE:
+0130   01B1           00576     CLRF _bit_count      ;Clear the 'bit_count' register
+0131   0180           00577     CLRF INDF            ;Clear the indirectly addressed register
+0132                  00578 _RECEIVE_BIT:
+0132   0C80           00579     RRF INDF, F          ;Shift the INDF register to the right
+                      00580 ;---------------Receive the positive pulse of the bit-----------------
+0133   0181           00581     CLRF TMR0           ;Otherwise clear the timer register
+0134   1D85           00582     BTFSS GPIO, ir      ;And wait while 'ir' is low
+0135   2934           00583     GOTO $-1
+0136   0801           00584     MOVF TMR0, W        ;Copy the TMR0 value into the W register
+0137   00AF           00585     MOVWF _count         ;and save the value into the 'count' register
+0138   3001           00586     MOVLW 1             ;Load 1 into W (256 us x 1 = 0.26 ms)
+0139   022F           00587     SUBWF _count, W      ;And subtract W from 'count'
+013A   1C03           00588     BTFSS STATUS, C     ;If 'count' < 1 (pulse is shorter than 0.26 ms)
+013B   2911           00589     GOTO _LOOP           ;then return to 'LOOP'
+013C   3003           00590     MOVLW 3             ;Load 3 into W (256 us x 3 = 0.77 ms)
+013D   022F           00591     SUBWF _count, W      ;And subtract W from 'count'
+013E   1803           00592     BTFSC STATUS, C     ;If 'count' > 3 (pulse is longer than 0.77 ms)
+013F   2911           00593     GOTO _LOOP           ;then return to 'LOOP'
+                      00594 ;---------------Receive the negative pulse of the bit-----------------
+0140   0181           00595     CLRF TMR0           ;Otherwise clear the timer register
+0141   1985           00596     BTFSC GPIO, ir      ;And wait while 'ir' is high
+0142   2941           00597     GOTO $-1
+0143   0801           00598     MOVF TMR0, W        ;Copy the TMR0 value into the W register
+0144   00AF           00599     MOVWF _count         ;and save the value into the 'count' register
+0145   3004           00600     MOVLW 4;///////////             ;Load 5 into W (256 us x 4 = 1.1 ms)
+0146   022F           00601     SUBWF _count, W      ;And subtract W from 'count'
+0147   1C03           00602     BTFSS STATUS, C     ;If 'count' < 4 (pulse is shorter than 1.1 ms)
+0148   294E           00603     GOTO _NEXT_BIT       ;then go to the 'NEXT_BIT' label
+0149   3008           00604     MOVLW 8             ;Load 8 into W (256 us x 8 = 2 ms)
+014A   022F           00605     SUBWF _count, W      ;And subtract W from 'count'
+014B   1803           00606     BTFSC STATUS, C     ;If 'count' > 8 (pulse is longer than 2 ms)
+014C   2911           00607     GOTO _LOOP           ;then go to the 'LOOP' label
+014D   1780           00608     BSF INDF, 7         ;Set the MSB of the INDF register
+014E                  00609 _NEXT_BIT:
+014E   0AB1           00610     INCF   _bit_count, F   ;Increment the 'bit_count' register
+014F   1DB1           00611     BTFSS  _bit_count, 3   ;Check if 'bit_count' becomes 8
+0150   2932           00612     GOTO   _RECEIVE_BIT    ;If it's not, then return to 'RECEIVE_BIT' label
+0151   0AB0           00613     INCF   _byte_count, F  ;Increment the 'byte_count' register
+0152   1930           00614     BTFSC  _byte_count, 2  ;Check if 'byte_count' becomes 4    
+0153   2956           00615     GOTO   _CHECK_DATA     ;If it is then go to 'CHECK_DATA' label
+0154   0A84           00616     INCF   FSR, F          ;Increment the indirect addressing pointer
+0155   2930           00617     GOTO   _RECEIVE_BYTE   ;and go to 'RECEIVE_BYTE' label
+                      00618 
+0156                  00619 _CHECK_DATA:
+0156   0935           00620     COMF _ir_data+1, W   ;Negate the second received byte
+0157   0634           00621     XORWF _ir_data, W    ;And implement the XOR between 1st and 2nd bytes
+0158   1D03           00622     BTFSS STATUS, Z      ;If the result is not 0 (bytes are not equal)
+0159   2911           00623     GOTO _LOOP           ;<--Then return to the 'LOOP' label
+015A   0937           00624     COMF _ir_data+3, W   ;Negate the fourth received byte
+015B   0636           00625     XORWF _ir_data+2, W  ;And implement the XOR between 3rd and 4th bytes
+015C   1D03           00626     BTFSS STATUS, Z      ;If the result is not 0 (bytes are not equal)
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 13
+
+
+LOC  OBJECT CODE     LINE SOURCE TEXT
+  VALUE
+
+015D   2911           00627     GOTO _LOOP           ;<--Then return to the 'LOOP' label
+                      00628 
+015E   3005           00629     MOVLW 0x05;//////////0x09          ;Check the R button (code 0x09)
+015F   0636           00630     XORWF _ir_data+2, W  ;If command is not 0x09
+0160   1D03           00631     BTFSS STATUS, Z
+0161   2963           00632     GOTO $+2            ;then skip the next three lines
+0162   285A           00633         goto DECREASE_VOLUME
+                      00634 
+0163   3006           00635     MOVLW 0x06;///////////8          ;Check the G button (code 0x08)
+0164   0636           00636     XORWF _ir_data+2, W  ;If command is not 0x08
+0165   1D03           00637     BTFSS STATUS, Z
+0166   2968           00638     GOTO $+2            ;then skip the next three lines
+0167   2856           00639         goto INCREASE_VOLUME
+                      00640 
+0168   3002           00641     MOVLW 0x02;//////7;A          ;Check the B button (code 0x0A)
+0169   0636           00642     XORWF _ir_data+2, W  ;If command is not 0x0A
+016A   1D03           00643     BTFSS STATUS, Z
+016B   296E           00644     GOTO $+3            ;then skip the next three lines
+016C   142B           00645     bsf button,0
+016D   2870           00646         goto CH_UP ;///////////////////
+                      00647 
+016E   3003           00648     MOVLW 0x03;//////////B          ;Check the W button (code 0x0B)
+016F   0636           00649     XORWF _ir_data+2, W  ;If command is not 0x0B
+0170   1D03           00650     BTFSS STATUS, Z
+0171   2974           00651     GOTO $+3            ;then skip the next three lines
+0172   102B           00652         bcf button,0
+0173   2870           00653         goto CH_UP ;////////////////////////
+                      00654 ; clrf _ir_data
+                      00655 ; clrf _ir_data+1
+                      00656 ; clrf _ir_data+2
+                      00657 ; clrf _ir_data+3
+                      00658 ;//     bsf INTCON, GPIE ;3;-> ENABLE the GPIO port change interrupt
+                      00659 ;//     bsf INTCON, GIE  ;7;-> ENABLE all interrupts
+                      00660 
+                      00661 ; retfie
+0174   2841           00662     GOTO LOOP           ;loop forever
+                      00663 
+                      00664     END                   ;/* END of the Program */.
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 14
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+ADIE                              00000006
+ADIF                              00000006
+BUTTONS_LOOP                      0000004D
+C                                 00000000
+CAL0                              00000002
+CAL1                              00000003
+CAL2                              00000004
+CAL3                              00000005
+CAL4                              00000006
+CAL5                              00000007
+CHANNEL_SEEK                      0000006B
+CHECK_BUTTONS                     000000A5
+CH_UP                             00000070
+CINV                              00000004
+CIS                               00000003
+CM0                               00000000
+CM1                               00000001
+CM2                               00000002
+CMCON                             00000019
+CMIE                              00000003
+CMIF                              00000003
+COUT                              00000006
+DC                                00000001
+DC1                               00000020
+DC2                               00000021
+DECREASE_VOLUME                   0000005A
+DELAY                             000000EA
+DELAY_LOOP                        000000EC
+EEADR                             0000009B
+EECON1                            0000009C
+EECON2                            0000009D
+EEDAT                             0000009A
+EEDATA                            0000009A
+EEIE                              00000007
+EEIF                              00000007
+F                                 00000001
+FSR                               00000004
+GIE                               00000007
+GP0                               00000000
+GP1                               00000001
+GP2                               00000002
+GP3                               00000003
+GP4                               00000004
+GP5                               00000005
+GPIE                              00000003
+GPIF                              00000000
+GPIO                              00000005
+GPIO0                             00000000
+GPIO1                             00000001
+GPIO2                             00000002
+GPIO3                             00000003
+GPIO4                             00000004
+GPIO5                             00000005
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 15
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+I2C_ACK                           000000E1
+I2C_CHECK_ACK                     000000CE
+I2C_NACK                          000000E6
+I2C_READ_BIT                      000000D8
+I2C_READ_BYTE                     000000D5
+I2C_SHIFT                         000000CA
+I2C_START                         000000BA
+I2C_STOP                          000000BD
+I2C_WRITE_0                       000000C9
+I2C_WRITE_1                       000000C7
+I2C_WRITE_BIT                     000000C4
+I2C_WRITE_BYTE                    000000C1
+INCREASE_VOLUME                   00000056
+INDF                              00000000
+INIT                              00000005
+INTCON                            0000000B
+INTE                              00000004
+INTEDG                            00000006
+INTF                              00000001
+INT_JMP                           00000113
+IOC                               00000096
+IOC0                              00000000
+IOC1                              00000001
+IOC2                              00000002
+IOC3                              00000003
+IOC4                              00000004
+IOC5                              00000005
+IOCB                              00000096
+IOCB0                             00000000
+IOCB1                             00000001
+IOCB2                             00000002
+IOCB3                             00000003
+IOCB4                             00000004
+IOCB5                             00000005
+IRP                               00000007
+IR_Rx                             00000111
+LOAD_EEPROM                       00000025
+LOOP                              00000041
+Loc_Ptr                           00000026
+NOT_BOD                           00000000
+NOT_BOR                           00000000
+NOT_GPPU                          00000007
+NOT_PD                            00000003
+NOT_POR                           00000001
+NOT_T1SYNC                        00000002
+NOT_TO                            00000004
+OPTION_REG                        00000081
+OSCCAL                            00000090
+PCL                               00000002
+PCLATH                            0000000A
+PCON                              0000008E
+PEIE                              00000006
+PIE1                              0000008C
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 16
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+PIR1                              0000000C
+PS0                               00000000
+PS1                               00000001
+PS2                               00000002
+PSA                               00000003
+RAM                               00000020
+RAM_                              00000038
+RD                                00000000
+READ_EEPROM                       0000010A
+RP0                               00000005
+RP1                               00000006
+SAVE_CH                           0000009C
+SAVE_VOLUME                       00000081
+SCL_HIGH                          000000B2
+SCL_LOW                           000000B6
+SDA_HIGH                          000000AA
+SDA_LOW                           000000AE
+SEEK_DOWN                         0000007B
+SET_VOLUME                        0000005D
+START_RADIO                       00000031
+STATUS                            00000003
+T0CS                              00000005
+T0IE                              00000005
+T0IF                              00000002
+T0SE                              00000004
+T1CKPS0                           00000004
+T1CKPS1                           00000005
+T1CON                             00000010
+T1IE                              00000000
+T1IF                              00000000
+T1OSCEN                           00000003
+TMR0                              00000001
+TMR0IE                            00000005
+TMR0IF                            00000002
+TMR1                              0000000E
+TMR1CS                            00000001
+TMR1GE                            00000006
+TMR1H                             0000000F
+TMR1IE                            00000000
+TMR1IF                            00000000
+TMR1L                             0000000E
+TMR1ON                            00000000
+TRISIO                            00000085
+TRISIO0                           00000000
+TRISIO1                           00000001
+TRISIO2                           00000002
+TRISIO3                           00000003
+TRISIO4                           00000004
+TRISIO5                           00000005
+VR0                               00000000
+VR1                               00000001
+VR2                               00000002
+VR3                               00000003
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 17
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+VRCON                             00000099
+VREN                              00000007
+VRR                               00000005
+W                                 00000000
+WAIT_FOR_TIMER                    00000084
+WPU                               00000095
+WPU0                              00000000
+WPU1                              00000001
+WPU2                              00000002
+WPU4                              00000004
+WPU5                              00000005
+WR                                00000001
+WREN                              00000002
+WRERR                             00000003
+WRITE_EEPROM                      000000F3
+Z                                 00000002
+_BODEN_OFF                        00003FBF
+_BODEN_ON                         00003FFF
+_BOREN_OFF                        00003FBF
+_BOREN_ON                         00003FFF
+_CHECK_DATA                       00000156
+_CONFIG                           00002007
+_CPD_OFF                          00003FFF
+_CPD_ON                           00003EFF
+_CP_OFF                           00003FFF
+_CP_ON                            00003F7F
+_DEVID1                           00002006
+_EC_OSC                           00003FFB
+_EXTRC_OSC_CLKOUT                 00003FFF
+_EXTRC_OSC_NOCLKOUT               00003FFE
+_FOSC_EC                          00003FFB
+_FOSC_EXTRCCLK                    00003FFF
+_FOSC_EXTRCIO                     00003FFE
+_FOSC_HS                          00003FFA
+_FOSC_INTRCCLK                    00003FFD
+_FOSC_INTRCIO                     00003FFC
+_FOSC_LP                          00003FF8
+_FOSC_XT                          00003FF9
+_HS_OSC                           00003FFA
+_IDLOC0                           00002000
+_IDLOC1                           00002001
+_IDLOC2                           00002002
+_IDLOC3                           00002003
+_INTRC_OSC_CLKOUT                 00003FFD
+_INTRC_OSC_NOCLKOUT               00003FFC
+_LOOP                             00000111
+_LP_OSC                           00003FF8
+_MCLRE_OFF                        00003FDF
+_MCLRE_ON                         00003FFF
+_NEXT_BIT                         0000014E
+_PWRTE_OFF                        00003FFF
+_PWRTE_ON                         00003FEF
+_RECEIVE_BIT                      00000132
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 18
+
+
+SYMBOL TABLE
+  LABEL                             VALUE 
+
+_RECEIVE_BYTE                     00000130
+_WDTE_OFF                         00003FF7
+_WDTE_ON                          00003FFF
+_WDT_OFF                          00003FF7
+_WDT_ON                           00003FFF
+_XT_OSC                           00003FF9
+__12F629                          00000001
+_bit_count                        00000031
+_byte_count                       00000030
+_color                            00000033
+_count                            0000002F
+_ir_data                          00000034
+_port                             00000032
+ack                               00000025
+bit_count                         00000022
+but_down                          00000001
+but_up                            00000000
+button                            0000002B
+count                             0000002A
+frequency_h                       00000029
+frequency_l                       00000028
+i2c_data                          00000023
+ir                                00000003
+need_save                         0000002E
+port                              00000024
+scl                               00000004
+sda                               00000005
+startup                           0000002C
+timer                             0000002D
+volume                            00000027
+write1                            00000105
+write2                            00000108
+
+
+MEMORY USAGE MAP ('X' = Used,  '-' = Unused)
+
+0000 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0040 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0080 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+00C0 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0100 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX
+0140 : XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXXXXXXXXXXXXX XXXXX-----------
+2000 : XXXX---X-------- ---------------- ---------------- ----------------
+
+All other memory blocks unused.
+
+Program Memory Words Used:   373
+Program Memory Words Free:   651
+
+
+MPASM  5.51       PIC12F629_675_EEPROM_IR.ASM   4-26-2026  19:56:06         PAGE 19
+
+
+
+
+
+Errors   :     0
+Warnings :     0 reported,     4 suppressed
+Messages :     0 reported,    24 suppressed
+
+
